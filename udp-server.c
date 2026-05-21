@@ -32,6 +32,11 @@
 #include "net/netstack.h"
 #include "net/ipv6/simple-udp.h"
 
+#include "cfs/cfs.h"
+#include "cfs/cfs-coffee.h"
+#include "sys/node-id.h"
+#include "firmware_data.h"
+
 #include "sys/log.h"
 #define LOG_MODULE "App"
 #define LOG_LEVEL LOG_LEVEL_INFO
@@ -41,6 +46,8 @@
 #define UDP_SERVER_PORT	5678
 #define BLOCK_SIZE 64 // Donanım kısıtları ve kararlı iletim için ideal parça boyutu
 
+#define FIRMWARE_FILE "new_fw.bin"
+
 typedef struct {
     uint16_t block_no;          // Kaçıncı blok olduğu (Sıralama ve Durum Yönetimi için) [cite: 107, 118]
     uint16_t data_len;          // Paketteki gerçek firmware bayt uzunluğu 
@@ -49,6 +56,12 @@ typedef struct {
 } ota_packet_t;
 
 static struct simple_udp_connection udp_conn;
+
+static uint16_t expected_block = 0;
+static int fd_write = -1;
+
+static uint16_t total_blocks = (FIRMWARE_PAYLOAD_LEN + BLOCK_SIZE - 1) / BLOCK_SIZE;
+static uint8_t transfer_complete = 0;
 
 PROCESS(udp_server_process, "UDP server");
 AUTOSTART_PROCESSES(&udp_server_process);
@@ -63,12 +76,18 @@ udp_rx_callback(struct simple_udp_connection *c,
          const uint8_t *data,
          uint16_t datalen)
 {
+  if(transfer_complete) {
+      // Aktarım bittikten sonra yolda gecikmiş/kaybolmuş bir paket veya ACK isteği gelirse es geç
+      return;
+  }
+
   // 1. Gelen ham veriyi ota_packet_t yapısına dönüştür
   ota_packet_t *received_packet = (ota_packet_t *)data;
-
+  /*
   LOG_INFO("Server: Received block %u from ", received_packet->block_no);
   LOG_INFO_6ADDR(sender_addr);
   LOG_INFO_("\n");
+  */
 
   // 2. Parça Doğrulama: Gelen verinin checksum'ını hesaplayıp kontrol et
   uint16_t calculated_sum = 0;
@@ -82,6 +101,41 @@ udp_rx_callback(struct simple_udp_connection *c,
       return; // Paketi işleme alma, ACK gönderme
   }
 
+  // Sıralama ve Diske Yazma
+  if(received_packet->block_no == expected_block) {
+      
+      if(fd_write >= 0) {
+          int written = cfs_write(fd_write, received_packet->data, received_packet->data_len);
+          if(written == received_packet->data_len) {
+              LOG_INFO("Blok %u diske yazildi.\n", received_packet->block_no);
+              expected_block++; 
+              
+              // BİTİŞ KONTROLÜ: Son blok da geldiyse dosyayı kapat ve doğrulama logunu bas
+              if(expected_block == total_blocks) {
+                  cfs_close(fd_write); // Dosya sistemini güvenli kapat
+                  LOG_INFO("================================================\n");
+                  LOG_INFO("BASARILI: Tum imaj (%u byte) CFS diskine kaydedildi!\n", (unsigned int)FIRMWARE_PAYLOAD_LEN);
+                  LOG_INFO("Tum-imaj dogrulama (Butunluk) tamamlandi.\n");
+                  LOG_INFO("================================================\n");
+                  transfer_complete = 1;
+              }
+          } else {
+              LOG_ERR("Diske yazma hatasi!\n");
+          }
+      }
+  } else if (received_packet->block_no < expected_block) {
+      LOG_INFO("Eski blok %u tekrar alindi, es gecildi.\n", received_packet->block_no);
+  } else {
+      return;
+  }
+  // Onay (ACK) Mekanizması
+#if WITH_SERVER_REPLY
+  uint16_t ack_no = received_packet->block_no;
+  simple_udp_sendto(&udp_conn, &ack_no, sizeof(ack_no), sender_addr);
+#endif 
+}
+
+/*bu durunun yazdığı
   // 3. Onay (ACK) Mekanizması: Başarılı bloğun numarasını göndericiye bildir
 #if WITH_SERVER_REPLY
   LOG_INFO("Sending ACK for block %u.\n", received_packet->block_no);
@@ -89,6 +143,7 @@ udp_rx_callback(struct simple_udp_connection *c,
   simple_udp_sendto(&udp_conn, &ack_no, sizeof(ack_no), sender_addr);
 #endif 
 }
+*/
 
 /*---------------------------------------------------------------------------*/
 PROCESS_THREAD(udp_server_process, ev, data)
@@ -101,6 +156,18 @@ PROCESS_THREAD(udp_server_process, ev, data)
   /* Initialize UDP connection */
   simple_udp_register(&udp_conn, UDP_SERVER_PORT, NULL,
                       UDP_CLIENT_PORT, udp_rx_callback);
+  
+  if(node_id == 1) {
+    LOG_INFO("Coffee FS formatlaniyor...\n");
+    cfs_coffee_format();
+
+    fd_write = cfs_open(FIRMWARE_FILE, CFS_WRITE);
+    if(fd_write < 0) {
+      LOG_ERR("Dosya olusturulamadi: %s\n", FIRMWARE_FILE);
+    } else {
+      LOG_INFO("Dosya hazir. Toplam %u blok bekleniyor...\n", total_blocks);
+    }
+  }
 
   PROCESS_END();
 }

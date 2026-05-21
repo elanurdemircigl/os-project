@@ -11,6 +11,8 @@
 #include "sys/node-id.h"
 #include "sys/log.h"
 
+#include "firmware_data.h"
+
 #define LOG_MODULE "App"
 #define LOG_LEVEL LOG_LEVEL_INFO
 
@@ -36,6 +38,9 @@ static struct simple_udp_connection udp_conn;
 static uint16_t current_block = 0; 
 static uint8_t ack_received = 1; // 1: Yeni blok göndermeye hazır, 0: ACK bekliyor (Stop-and-Wait) [cite: 122]
 
+static uint16_t total_blocks = (FIRMWARE_PAYLOAD_LEN + BLOCK_SIZE - 1) / BLOCK_SIZE;
+static uint8_t transfer_complete = 0;
+
 /*---------------------------------------------------------------------------*/
 PROCESS(udp_client_process, "UDP client");
 AUTOSTART_PROCESSES(&udp_client_process);
@@ -49,10 +54,12 @@ udp_rx_callback(struct simple_udp_connection *c,
          const uint8_t *data,
          uint16_t datalen)
 {
+  /*
   (void)c;
   (void)sender_port;
   (void)receiver_addr;
   (void)receiver_port;
+  */
 
   // Server bize sadece uint16_t tipinde bir ACK (onay) numarası döndürüyor
   if(datalen == sizeof(uint16_t)) {
@@ -82,8 +89,15 @@ PROCESS_THREAD(udp_client_process, ev, data)
                       UDP_SERVER_PORT, udp_rx_callback);
 
   etimer_set(&periodic_timer, random_rand() % SEND_INTERVAL);
+
+  LOG_INFO("OTA Client Started. Total Firmware Size: %u bytes, total Blocks: %u\n", (unsigned int)FIRMWARE_PAYLOAD_LEN, total_blocks);
+
   while(1) {
     PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&periodic_timer));
+
+    if(transfer_complete) {
+      continue; //aktarım bittiyse timer ı yenilemeden döngünün sonunu bekle.  
+    }
 
     if(NETSTACK_ROUTING.node_is_reachable() &&
         NETSTACK_ROUTING.get_root_ipaddr(&dest_ipaddr)) {
@@ -91,26 +105,36 @@ PROCESS_THREAD(udp_client_process, ev, data)
       // Sadece 2 numaralı gönderici düğüm bu bloğu çalıştırır [cite: 34, 38]
       if(node_id == 2) {
         
-        // Eğer önceki bloğun onayı geldiyse yeni paketi hazbullet [cite: 122]
+        // Aktarımın bitip bitmediğini kontrol et
+        if (current_block >= total_blocks) {
+             LOG_INFO("SUCCESS: All %u blocks transmitted and acknowledged!\n", total_blocks);
+             transfer_complete = 1;
+             continue;
+        }
+
         if(ack_received == 1) {
             packet.block_no = current_block;
-            packet.data_len = BLOCK_SIZE;
             
-            // Projenin bir sonraki adımında buraya gerçek firmware dizisi gelecek [cite: 105]
-            // Şimdilik test amaçlı paketin içini dolgu verisiyle dolduruyoruz
-            memset(packet.data, 0xA5, BLOCK_SIZE); 
+            // Bu blok için okunacak veri boyutunu hesapla (Son blok BLOCK_SIZE'dan küçük olabilir)
+            uint16_t offset = current_block * BLOCK_SIZE;
+            uint16_t remaining_bytes = FIRMWARE_PAYLOAD_LEN - offset;
+            packet.data_len = (remaining_bytes < BLOCK_SIZE) ? remaining_bytes : BLOCK_SIZE;
             
-            // Parça Doğrulama için basit Checksum hesaplaması [cite: 107, 119]
+            // Belleği sıfırla ve gerçek firmware verisini diziye kopyala
+            memset(packet.data, 0, BLOCK_SIZE);
+            memcpy(packet.data, &firmware_payload[offset], packet.data_len); 
+            
+            // Checksum Hesaplaması
             uint16_t sum = 0;
-            for(int i = 0; i < BLOCK_SIZE; i++) {
+            for(int i = 0; i < packet.data_len; i++) {
                 sum += packet.data[i];
             }
             packet.checksum = sum;
             
-            ack_received = 0; // Paket gönderiliyor, ACK gelene kadar kilitle [cite: 122]
+            ack_received = 0; 
         }
 
-        LOG_INFO("Sending OTA block %" PRIu16 " to ", packet.block_no);
+        LOG_INFO("Sending OTA block %" PRIu16 "(len: %u) to ", packet.block_no, packet.data_len);
         LOG_INFO_6ADDR(&dest_ipaddr);
         LOG_INFO_("\n");
 
