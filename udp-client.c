@@ -10,24 +10,31 @@
 
 #include "sys/node-id.h"
 #include "sys/log.h"
+
 #define LOG_MODULE "App"
 #define LOG_LEVEL LOG_LEVEL_INFO
 
 #define WITH_SERVER_REPLY  1
-#define UDP_CLIENT_PORT	8765
-#define UDP_SERVER_PORT	5678
+#define UDP_CLIENT_PORT 8765
+#define UDP_SERVER_PORT 5678
 
-#define SEND_INTERVAL		  (10 * CLOCK_SECOND)
+#define SEND_INTERVAL     (2 * CLOCK_SECOND) // Testlerin hızlanması için ideal süre
+
+#define BLOCK_SIZE 64 // Donanım kısıtları ve kararlı iletim için ideal parça boyutu
+
+// Ortak Paket Yapısı [cite: 107]
+typedef struct {
+    uint16_t block_no;          // Kaçıncı blok olduğu (Sıralama ve Durum Yönetimi için) [cite: 107, 118]
+    uint16_t data_len;          // Paketteki gerçek firmware bayt uzunluğu 
+    uint16_t checksum;          // Parça doğrulaması için basit bit kontrolü (veya CRC) [cite: 107, 119]
+    uint8_t data[BLOCK_SIZE];   // new-firmware.z1 dosyasından okunan ham makine kodları [cite: 30, 73]
+} ota_packet_t;
 
 static struct simple_udp_connection udp_conn;
-static uint32_t rx_count = 0;
-static ota_boot_metadata_t boot_metadata = {
-  .magic = OTA_IMAGE_MAGIC,
-  .active_slot = OTA_SLOT_A,
-  .candidate_slot = OTA_SLOT_NONE,
-  .state_a = OTA_IMAGE_STATE_CONFIRMED,
-  .state_b = OTA_IMAGE_STATE_EMPTY,
-};
+
+// Akış ve Durum Yönetimi Değişkenleri [cite: 122, 123]
+static uint16_t current_block = 0; 
+static uint8_t ack_received = 1; // 1: Yeni blok göndermeye hazır, 0: ACK bekliyor (Stop-and-Wait) [cite: 122]
 
 /*---------------------------------------------------------------------------*/
 PROCESS(udp_client_process, "UDP client");
@@ -42,42 +49,31 @@ udp_rx_callback(struct simple_udp_connection *c,
          const uint8_t *data,
          uint16_t datalen)
 {
-  static uint32_t fake_version = 2;
-  uint32_t fake_image_crc;
-
   (void)c;
   (void)sender_port;
   (void)receiver_addr;
   (void)receiver_port;
 
-  LOG_INFO("Client received response '%.*s' from ", datalen, (char *) data);
-  LOG_INFO_6ADDR(sender_addr);
-#if LLSEC802154_CONF_ENABLED
-  LOG_INFO_(" LLSEC LV:%d", uipbuf_get_attr(UIPBUF_ATTR_LLSEC_LEVEL));
-#endif
-  LOG_INFO_("\n");
-  rx_count++;
-
-  /*
-   * Placeholder integration for the first OTA path.
-   * In the real receiver, this information must come from the fully assembled
-   * Slot B image stored in flash.
-   */
-  fake_image_crc = ota_crc32_buffer(data, datalen);
-  if(ota_metadata_mark_verified(&boot_metadata, OTA_SLOT_B,
-                                fake_version, datalen, fake_image_crc) &&
-     ota_metadata_stage_verified_image(&boot_metadata, OTA_SLOT_B)) {
-    LOG_INFO("OTA metadata updated: slot B staged for activation\n");
+  // Server bize sadece uint16_t tipinde bir ACK (onay) numarası döndürüyor
+  if(datalen == sizeof(uint16_t)) {
+      uint16_t *ack_no = (uint16_t *)data;
+      
+      LOG_INFO("Client: Received ACK for block %" PRIu16 "\n", *ack_no);
+      
+      // Gelen onay, gönderdiğimiz bloğun onayı ise bir sonraki bloğa geçiş izni ver [cite: 122]
+      if(*ack_no == current_block) {
+          ack_received = 1;  
+          current_block++;   
+      }
   }
 }
 /*---------------------------------------------------------------------------*/
 PROCESS_THREAD(udp_client_process, ev, data)
 {
   static struct etimer periodic_timer;
-  static char str[32];
+  static ota_packet_t packet;
   uip_ipaddr_t dest_ipaddr;
-  static uint32_t tx_count;
-  static uint32_t missed_tx_count;
+ 
 
   PROCESS_BEGIN();
 
@@ -92,31 +88,43 @@ PROCESS_THREAD(udp_client_process, ev, data)
     if(NETSTACK_ROUTING.node_is_reachable() &&
         NETSTACK_ROUTING.get_root_ipaddr(&dest_ipaddr)) {
 
-// Bu blok 3 numarali cihazda calismaz. 2-den-1-e gonderim icin yapildi. 3 numarali
-// cihaz komsuluk gorevi yapar. İletime yardim eder.
-
+      // Sadece 2 numaralı gönderici düğüm bu bloğu çalıştırır [cite: 34, 38]
       if(node_id == 2) {
+        
+        // Eğer önceki bloğun onayı geldiyse yeni paketi hazbullet [cite: 122]
+        if(ack_received == 1) {
+            packet.block_no = current_block;
+            packet.data_len = BLOCK_SIZE;
+            
+            // Projenin bir sonraki adımında buraya gerçek firmware dizisi gelecek [cite: 105]
+            // Şimdilik test amaçlı paketin içini dolgu verisiyle dolduruyoruz
+            memset(packet.data, 0xA5, BLOCK_SIZE); 
+            
+            // Parça Doğrulama için basit Checksum hesaplaması [cite: 107, 119]
+            uint16_t sum = 0;
+            for(int i = 0; i < BLOCK_SIZE; i++) {
+                sum += packet.data[i];
+            }
+            packet.checksum = sum;
+            
+            ack_received = 0; // Paket gönderiliyor, ACK gelene kadar kilitle [cite: 122]
+        }
 
-        LOG_INFO("Sending request %" PRIu32 " to ", tx_count);
+        LOG_INFO("Sending OTA block %" PRIu16 " to ", packet.block_no);
         LOG_INFO_6ADDR(&dest_ipaddr);
         LOG_INFO_("\n");
 
-        snprintf(str, sizeof(str), "Merhaba %" PRIu32, tx_count);
-        simple_udp_sendto(&udp_conn, str, strlen(str), &dest_ipaddr);
-        tx_count++;
+        // Paketi gönderir. ACK gelmediyse zamanlayıcı dolunca aynı paketi tekrar fırlatır (Retransmission) [cite: 110, 121]
+        simple_udp_sendto(&udp_conn, &packet, sizeof(ota_packet_t), &dest_ipaddr);  
       }
-
 
     } else {
       LOG_INFO("Not reachable yet\n");
-      if(tx_count > 0) {
-        missed_tx_count++;
-      }
+      
     }
 
-    /* Add some jitter */
-    etimer_set(&periodic_timer, SEND_INTERVAL
-      - CLOCK_SECOND + (random_rand() % (2 * CLOCK_SECOND)));
+    /* Zaman aşımı (Timeout) kontrolü için periyodik tetikleme [cite: 121] */
+    etimer_set(&periodic_timer, SEND_INTERVAL);
   }
 
   PROCESS_END();

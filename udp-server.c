@@ -39,13 +39,22 @@
 #define WITH_SERVER_REPLY  1
 #define UDP_CLIENT_PORT	8765
 #define UDP_SERVER_PORT	5678
+#define BLOCK_SIZE 64 // Donanım kısıtları ve kararlı iletim için ideal parça boyutu
+
+typedef struct {
+    uint16_t block_no;          // Kaçıncı blok olduğu (Sıralama ve Durum Yönetimi için) [cite: 107, 118]
+    uint16_t data_len;          // Paketteki gerçek firmware bayt uzunluğu 
+    uint16_t checksum;          // Parça doğrulaması için basit bit kontrolü (veya CRC) [cite: 107, 119]
+    uint8_t data[BLOCK_SIZE];   // new-firmware.z1 dosyasından okunan ham makine kodları [cite: 30, 73]
+} ota_packet_t;
 
 static struct simple_udp_connection udp_conn;
 
 PROCESS(udp_server_process, "UDP server");
 AUTOSTART_PROCESSES(&udp_server_process);
 /*---------------------------------------------------------------------------*/
-static void
+
+ static void
 udp_rx_callback(struct simple_udp_connection *c,
          const uip_ipaddr_t *sender_addr,
          uint16_t sender_port,
@@ -54,15 +63,33 @@ udp_rx_callback(struct simple_udp_connection *c,
          const uint8_t *data,
          uint16_t datalen)
 {
-  LOG_INFO("Received request '%.*s' from ", datalen, (char *) data);
+  // 1. Gelen ham veriyi ota_packet_t yapısına dönüştür
+  ota_packet_t *received_packet = (ota_packet_t *)data;
+
+  LOG_INFO("Server: Received block %u from ", received_packet->block_no);
   LOG_INFO_6ADDR(sender_addr);
   LOG_INFO_("\n");
+
+  // 2. Parça Doğrulama: Gelen verinin checksum'ını hesaplayıp kontrol et
+  uint16_t calculated_sum = 0;
+  for(int i = 0; i < received_packet->data_len; i++) {
+      calculated_sum += received_packet->data[i];
+  }
+
+  // Eğer hesaplanan değer ile paketteki değer uyuşmuyorsa paketi reddet
+  if(calculated_sum != received_packet->checksum) {
+      LOG_ERR("Checksum HATASI! Blok %u bozuk geldi.\n", received_packet->block_no);
+      return; // Paketi işleme alma, ACK gönderme
+  }
+
+  // 3. Onay (ACK) Mekanizması: Başarılı bloğun numarasını göndericiye bildir
 #if WITH_SERVER_REPLY
-  /* send back the same string to the client as an echo reply */
-  LOG_INFO("Sending response.\n");
-  simple_udp_sendto(&udp_conn, data, datalen, sender_addr);
-#endif /* WITH_SERVER_REPLY */
+  LOG_INFO("Sending ACK for block %u.\n", received_packet->block_no);
+  uint16_t ack_no = received_packet->block_no;
+  simple_udp_sendto(&udp_conn, &ack_no, sizeof(ack_no), sender_addr);
+#endif 
 }
+
 /*---------------------------------------------------------------------------*/
 PROCESS_THREAD(udp_server_process, ev, data)
 {
