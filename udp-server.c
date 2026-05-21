@@ -114,8 +114,7 @@ udp_rx_callback(struct simple_udp_connection *c,
               if(expected_block == total_blocks) {
                   cfs_close(fd_write); // Dosya sistemini güvenli kapat
                   LOG_INFO("================================================\n");
-                  LOG_INFO("BASARILI: Tum imaj (%u byte) CFS diskine kaydedildi!\n", (unsigned int)FIRMWARE_PAYLOAD_LEN);
-                  LOG_INFO("Tum-imaj dogrulama (Butunluk) tamamlandi.\n");
+                  LOG_INFO("Yuklenmeye hazir yeni firmware alimi tamamlandi.\n");
                   LOG_INFO("================================================\n");
                   transfer_complete = 1;
               }
