@@ -12,6 +12,7 @@
 #include "sys/log.h"
 
 #include "firmware_data.h"
+#include "crc32.c"
 
 #define LOG_MODULE "App"
 #define LOG_LEVEL LOG_LEVEL_INFO
@@ -23,6 +24,8 @@
 #define SEND_INTERVAL     (2 * CLOCK_SECOND) // Testlerin hızlanması için ideal süre
 
 #define BLOCK_SIZE 64 // Donanım kısıtları ve kararlı iletim için ideal parça boyutu
+#define OTA_END_BLOCK 0xFFFF
+#define OTA_CRC_ERROR 0xFFFE
 
 // Ortak Paket Yapısı [cite: 107]
 typedef struct {
@@ -40,6 +43,7 @@ static uint8_t ack_received = 1; // 1: Yeni blok göndermeye hazır, 0: ACK bekl
 
 static uint16_t total_blocks = (FIRMWARE_PAYLOAD_LEN + BLOCK_SIZE - 1) / BLOCK_SIZE;
 static uint8_t transfer_complete = 0;
+static uint8_t finish_log_printed = 0;
 
 /*---------------------------------------------------------------------------*/
 PROCESS(udp_client_process, "UDP client");
@@ -66,6 +70,20 @@ udp_rx_callback(struct simple_udp_connection *c,
       uint16_t *ack_no = (uint16_t *)data;
       
       LOG_INFO("Client: Received ACK for block %" PRIu16 "\n", *ack_no);
+
+      if(*ack_no == OTA_END_BLOCK) {
+          LOG_INFO("OTA transfer completed. Final CRC accepted by server.\n");
+          transfer_complete = 1;
+          ack_received = 1;
+          return;
+      }
+
+      if(*ack_no == OTA_CRC_ERROR) {
+          LOG_ERR("Firmware CRC verification failed on server. Restarting transfer.\n");
+          current_block = 0;
+          ack_received = 1;
+          return;
+      }
       
       // Gelen onay, gönderdiğimiz bloğun onayı ise bir sonraki bloğa geçiş izni ver [cite: 122]
       if(*ack_no == current_block) {
@@ -96,7 +114,13 @@ PROCESS_THREAD(udp_client_process, ev, data)
     PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&periodic_timer));
 
     if(transfer_complete) {
-      continue; //aktarım bittiyse timer ı yenilemeden döngünün sonunu bekle.  
+      if(!finish_log_printed) {
+        LOG_INFO("OTA client stopped. No more packets will be sent.\n");
+        finish_log_printed = 1;
+        etimer_stop(&periodic_timer);
+      }
+      PROCESS_WAIT_EVENT();
+      continue;
     }
 
     if(NETSTACK_ROUTING.node_is_reachable() &&
@@ -107,8 +131,18 @@ PROCESS_THREAD(udp_client_process, ev, data)
         
         // Aktarımın bitip bitmediğini kontrol et
         if (current_block >= total_blocks) {
-             LOG_INFO("SUCCESS: All %u blocks transmitted and acknowledged!\n", total_blocks);
-             transfer_complete = 1;
+             uint32_t crcFirmware = crc32(firmware_payload, FIRMWARE_PAYLOAD_LEN);
+
+             packet.block_no = OTA_END_BLOCK;
+             packet.data_len = sizeof(crcFirmware);
+             packet.checksum = 0;
+             memset(packet.data, 0, BLOCK_SIZE);
+             memcpy(packet.data, &crcFirmware, sizeof(crcFirmware));
+
+             LOG_INFO("All data blocks ACKed. Sending final CRC32: 0x%08X\n", (unsigned int)crcFirmware);
+             simple_udp_sendto(&udp_conn, &packet, sizeof(ota_packet_t), &dest_ipaddr);
+
+             etimer_set(&periodic_timer, SEND_INTERVAL);
              continue;
         }
 

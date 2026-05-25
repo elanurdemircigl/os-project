@@ -36,6 +36,7 @@
 #include "cfs/cfs-coffee.h"
 #include "sys/node-id.h"
 #include "firmware_data.h"
+#include "crc32.c"
 
 #include "sys/log.h"
 #define LOG_MODULE "App"
@@ -45,6 +46,8 @@
 #define UDP_CLIENT_PORT	8765
 #define UDP_SERVER_PORT	5678
 #define BLOCK_SIZE 64 // Donanım kısıtları ve kararlı iletim için ideal parça boyutu
+#define OTA_END_BLOCK 0xFFFF
+#define OTA_CRC_ERROR 0xFFFE
 
 #define FIRMWARE_FILE "new_fw.bin"
 
@@ -76,13 +79,50 @@ udp_rx_callback(struct simple_udp_connection *c,
          const uint8_t *data,
          uint16_t datalen)
 {
+  // 1. Gelen ham veriyi ota_packet_t yapısına dönüştür
+  ota_packet_t *received_packet = (ota_packet_t *)data;
+
   if(transfer_complete) {
-      // Aktarım bittikten sonra yolda gecikmiş/kaybolmuş bir paket veya ACK isteği gelirse es geç
+      // Final ACK kaybolursa client CRC paketini tekrar gönderebilir.
+      // Bu durumda sessiz kalmak yerine final ACK'i tekrar dönüyoruz.
+      if(received_packet->block_no == OTA_END_BLOCK) {
+          uint16_t ack_no = OTA_END_BLOCK;
+          simple_udp_sendto(&udp_conn, &ack_no, sizeof(ack_no), sender_addr);
+      }
       return;
   }
 
-  // 1. Gelen ham veriyi ota_packet_t yapısına dönüştür
-  ota_packet_t *received_packet = (ota_packet_t *)data;
+  if(received_packet->block_no == OTA_END_BLOCK) {
+      uint16_t ack_no;
+      uint32_t received_crc;
+      uint32_t calculated_crc;
+
+      if(expected_block != total_blocks) {
+          LOG_ERR("CRC paketi erken geldi! Beklenen blok: %u / %u\n", expected_block, total_blocks);
+          ack_no = OTA_CRC_ERROR;
+          simple_udp_sendto(&udp_conn, &ack_no, sizeof(ack_no), sender_addr);
+          return;
+      }
+
+      memcpy(&received_crc, received_packet->data, sizeof(received_crc));
+      calculated_crc = crc32(firmware_payload, FIRMWARE_PAYLOAD_LEN);
+
+      if(received_crc == calculated_crc) {
+          LOG_INFO("CRC32 dogrulamasi basarili! Firmware butunlugu saglandi.\n");
+          LOG_INFO("================================================\n");
+          LOG_INFO("OTA transfer tamamen tamamlandi.\n");
+          LOG_INFO("================================================\n");
+          ack_no = OTA_END_BLOCK;
+          transfer_complete = 1;
+      } else {
+          LOG_ERR("CRC32 dogrulamasi basarisiz! Received: 0x%08X Calculated: 0x%08X\n",
+                  (unsigned int)received_crc, (unsigned int)calculated_crc);
+          ack_no = OTA_CRC_ERROR;
+      }
+
+      simple_udp_sendto(&udp_conn, &ack_no, sizeof(ack_no), sender_addr);
+      return;
+  }
   /*
   LOG_INFO("Server: Received block %u from ", received_packet->block_no);
   LOG_INFO_6ADDR(sender_addr);
@@ -113,10 +153,8 @@ udp_rx_callback(struct simple_udp_connection *c,
               // BİTİŞ KONTROLÜ: Son blok da geldiyse dosyayı kapat ve doğrulama logunu bas
               if(expected_block == total_blocks) {
                   cfs_close(fd_write); // Dosya sistemini güvenli kapat
-                  LOG_INFO("================================================\n");
-                  LOG_INFO("Yuklenmeye hazir yeni firmware alimi tamamlandi.\n");
-                  LOG_INFO("================================================\n");
-                  transfer_complete = 1;
+                  fd_write = -1;
+                  LOG_INFO("Tum veri bloklari diske yazildi. CRC paketi bekleniyor...\n");
               }
           } else {
               LOG_ERR("Diske yazma hatasi!\n");
