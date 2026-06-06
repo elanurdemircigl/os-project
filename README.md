@@ -160,26 +160,27 @@ Coffee FS'teki dosyadan hesapladığı CRC32 ile karşılaştırır. Eşleşmezs
 
 ## 9. Sistem Akışı
 
-İstemci                                      Sunucu
-|                                            |
-|--- RPL ağına katıl ------------------->    |
-|                                            |--- DODAG kökü ol
-|<-- Ağa erişim sağlandı ---------------     |
-|                                            |
-|--- Block #0 (data + checksum) -------->    |
-|                                            |--- Checksum doğrula
-|                                            |--- CFS'e yaz
-|<-- ACK #0 ----------------------------     |
-|                                            |
-|--- Block #1 ... Block #N ------------->    |
-|<-- ACK #1 ... ACK #N -----------------     |
-|                                            |
-|--- END (CRC32) ----------------------->    |
-|                                            |--- CRC32 doğrula
-|<-- ACK END (0xFFFF) ------------------     |
-|                                            |
-[ Aktarım Tamamlandı ]
-
+```
+İstemci                                  Sunucu
+   |                                        |
+   |──── RPL ağına katıl ─────────────────► |
+   |                                        |──── DODAG kökü ol
+   |◄─── Ağa erişim sağlandı ────────────── |
+   |                                        |
+   |──── Block #0 (data + checksum) ──────► |
+   |                                        |──── Checksum doğrula
+   |                                        |──── CFS'e yaz
+   |◄─── ACK #0 ──────────────────────────  |
+   |                                        |
+   |──── Block #1 ... Block #N ───────────► |
+   |◄─── ACK #1  ... ACK #N ──────────────  |
+   |                                        |
+   |──── END (CRC32) ─────────────────────► |
+   |                                        |──── CRC32 doğrula
+   |◄─── ACK END (0xFFFF) ────────────────  |
+   |                                        |
+          [ Aktarım Tamamlandı ]
+```
 ---
 
 ## 10. Kurulum ve Çalıştırma
