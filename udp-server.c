@@ -105,7 +105,30 @@ udp_rx_callback(struct simple_udp_connection *c,
       }
 
       memcpy(&received_crc, received_packet->data, sizeof(received_crc));
-      calculated_crc = crc32(firmware_payload, FIRMWARE_PAYLOAD_LEN);
+      int fd_read = cfs_open(FIRMWARE_FILE, CFS_READ);
+     if (fd_read < 0) {
+         LOG_ERR("HATA: CRC kontrolu icin %s dosyasi acilmadi!\n" , FIRMWARE_FILE);
+         ack_no = OTA_CRC_ERROR;
+         simple_udp_sendto(&udp_conn, &ack_no, sizeof(ack_no), sender_addr);
+         return;
+}
+    uint8_t file_buffer[FIRMWARE_PAYLOAD_LEN];
+    int bytes_read = cfs_read(fd_read, file_buffer, FIRMWARE_PAYLOAD_LEN);
+
+   cfs_close(fd_read);
+
+   if (bytes_read != FIRMWARE_PAYLOAD_LEN) {
+    LOG_ERR("HATA: Dosyadan eksik okuma yapildi! Okunan: %d , Beklenen: %d\n", bytes_read, FIRMWARE_PAYLOAD_LEN);
+    ack_no = OTA_CRC_ERROR;
+    simple_udp_sendto(&udp_conn, &ack_no, sizeof(ack_no), sender_addr);
+    return;
+
+}
+  calculated_crc = crc32(file_buffer, FIRMWARE_PAYLOAD_LEN);
+
+
+    //eski kod:
+//  calculated_crc = crc32(firmware_payload, FIRMWARE_PAYLOAD_LEN);
 
       if(received_crc == calculated_crc) {
           LOG_INFO("CRC32 dogrulamasi basarili! Firmware butunlugu saglandi.\n");
