@@ -21,25 +21,25 @@
 #define UDP_CLIENT_PORT 8765
 #define UDP_SERVER_PORT 5678
 
-#define SEND_INTERVAL     (2 * CLOCK_SECOND) // Testlerin hızlanması için ideal süre
+#define SEND_INTERVAL     (10 * CLOCK_SECOND) 
 
-#define BLOCK_SIZE 64 // Donanım kısıtları ve kararlı iletim için ideal parça boyutu
+#define BLOCK_SIZE 64 // Donanım kısıtları ve kararlı iletim için parça boyutu
 #define OTA_END_BLOCK 0xFFFF
 #define OTA_CRC_ERROR 0xFFFE
 
-// Ortak Paket Yapısı [cite: 107]
+// Ortak Paket Yapısı
 typedef struct {
-    uint16_t block_no;          // Kaçıncı blok olduğu (Sıralama ve Durum Yönetimi için) [cite: 107, 118]
+    uint16_t block_no;          // Kaçıncı blok olduğu (Sıralama ve Durum Yönetimi için)
     uint16_t data_len;          // Paketteki gerçek firmware bayt uzunluğu 
-    uint16_t checksum;          // Parça doğrulaması için basit bit kontrolü (veya CRC) [cite: 107, 119]
-    uint8_t data[BLOCK_SIZE];   // new-firmware.z1 dosyasından okunan ham makine kodları [cite: 30, 73]
+    uint16_t checksum;          // Parça doğrulaması için basit bit kontrolü
+    uint8_t data[BLOCK_SIZE];   // new-firmware.z1 dosyasından okunan ham makine kodları
 } ota_packet_t;
 
 static struct simple_udp_connection udp_conn;
 
-// Akış ve Durum Yönetimi Değişkenleri [cite: 122, 123]
+// Akış ve Durum Yönetimi Değişkenleri
 static uint16_t current_block = 0; 
-static uint8_t ack_received = 1; // 1: Yeni blok göndermeye hazır, 0: ACK bekliyor (Stop-and-Wait) [cite: 122]
+static uint8_t ack_received = 1; // stop and wait
 
 static uint16_t total_blocks = (FIRMWARE_PAYLOAD_LEN + BLOCK_SIZE - 1) / BLOCK_SIZE;
 static uint8_t transfer_complete = 0;
@@ -58,14 +58,8 @@ udp_rx_callback(struct simple_udp_connection *c,
          const uint8_t *data,
          uint16_t datalen)
 {
-  /*
-  (void)c;
-  (void)sender_port;
-  (void)receiver_addr;
-  (void)receiver_port;
-  */
 
-  // Server bize sadece uint16_t tipinde bir ACK (onay) numarası döndürüyor
+  //server bize sadece uint16_t tipinde bir onay numarası döndürüyor
   if(datalen == sizeof(uint16_t)) {
       uint16_t *ack_no = (uint16_t *)data;
       
@@ -85,7 +79,7 @@ udp_rx_callback(struct simple_udp_connection *c,
           return;
       }
       
-      // Gelen onay, gönderdiğimiz bloğun onayı ise bir sonraki bloğa geçiş izni ver [cite: 122]
+      //gelen onay gönderdiğimiz bloğun onayı ise bir sonraki bloğa geçiş izni ver
       if(*ack_no == current_block) {
           ack_received = 1;  
           current_block++;   
@@ -102,7 +96,6 @@ PROCESS_THREAD(udp_client_process, ev, data)
 
   PROCESS_BEGIN();
 
-  /* Initialize UDP connection */
   simple_udp_register(&udp_conn, UDP_CLIENT_PORT, NULL,
                       UDP_SERVER_PORT, udp_rx_callback);
 
@@ -126,10 +119,10 @@ PROCESS_THREAD(udp_client_process, ev, data)
     if(NETSTACK_ROUTING.node_is_reachable() &&
         NETSTACK_ROUTING.get_root_ipaddr(&dest_ipaddr)) {
 
-      // Sadece 2 numaralı gönderici düğüm bu bloğu çalıştırır [cite: 34, 38]
+      //sadece 2 numaralı gönderici düğüm bu bloğu çalıştırır
       if(node_id == 2) {
         
-        // Aktarımın bitip bitmediğini kontrol et
+        //aktarım bitti mi?
         if (current_block >= total_blocks) {
              uint32_t crcFirmware = crc32(firmware_payload, FIRMWARE_PAYLOAD_LEN);
 
@@ -149,16 +142,16 @@ PROCESS_THREAD(udp_client_process, ev, data)
         if(ack_received == 1) {
             packet.block_no = current_block;
             
-            // Bu blok için okunacak veri boyutunu hesapla (Son blok BLOCK_SIZE'dan küçük olabilir)
+            //bu blok için okunacak veri boyutunu hesapla
             uint16_t offset = current_block * BLOCK_SIZE;
             uint16_t remaining_bytes = FIRMWARE_PAYLOAD_LEN - offset;
             packet.data_len = (remaining_bytes < BLOCK_SIZE) ? remaining_bytes : BLOCK_SIZE;
             
-            // Belleği sıfırla ve gerçek firmware verisini diziye kopyala
+            //belleği sıfırla ve gerçek firmware verisini diziye kopyala
             memset(packet.data, 0, BLOCK_SIZE);
             memcpy(packet.data, &firmware_payload[offset], packet.data_len); 
             
-            // Checksum Hesaplaması
+            //Checksum Hesaplaması
             uint16_t sum = 0;
             for(int i = 0; i < packet.data_len; i++) {
                 sum += packet.data[i];
@@ -172,7 +165,7 @@ PROCESS_THREAD(udp_client_process, ev, data)
         LOG_INFO_6ADDR(&dest_ipaddr);
         LOG_INFO_("\n");
 
-        // Paketi gönderir. ACK gelmediyse zamanlayıcı dolunca aynı paketi tekrar fırlatır (Retransmission) [cite: 110, 121]
+        //paketi gönderir. ACK gelmediyse zamanlayıcı dolunca aynı paketi tekrar fırlatır
         simple_udp_sendto(&udp_conn, &packet, sizeof(ota_packet_t), &dest_ipaddr);  
       }
 
@@ -181,7 +174,7 @@ PROCESS_THREAD(udp_client_process, ev, data)
       
     }
 
-    /* Zaman aşımı (Timeout) kontrolü için periyodik tetikleme [cite: 121] */
+    //Zaman aşımı kontrolü için periyodik tetikleme
     etimer_set(&periodic_timer, SEND_INTERVAL);
   }
 

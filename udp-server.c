@@ -52,10 +52,10 @@
 #define FIRMWARE_FILE "new_fw.bin"
 
 typedef struct {
-    uint16_t block_no;          // Kaçıncı blok olduğu (Sıralama ve Durum Yönetimi için) [cite: 107, 118]
+    uint16_t block_no;          // Kaçıncı blok olduğu (Sıralama ve Durum Yönetimi için)
     uint16_t data_len;          // Paketteki gerçek firmware bayt uzunluğu 
-    uint16_t checksum;          // Parça doğrulaması için basit bit kontrolü (veya CRC) [cite: 107, 119]
-    uint8_t data[BLOCK_SIZE];   // new-firmware.z1 dosyasından okunan ham makine kodları [cite: 30, 73]
+    uint16_t checksum;          // Parça doğrulaması için basit bit kontrolü
+    uint8_t data[BLOCK_SIZE];   // new-firmware.z1 dosyasından okunan ham makine kodları
 } ota_packet_t;
 
 static struct simple_udp_connection udp_conn;
@@ -127,9 +127,6 @@ udp_rx_callback(struct simple_udp_connection *c,
   calculated_crc = crc32(file_buffer, FIRMWARE_PAYLOAD_LEN);
 
 
-    //eski kod:
-//  calculated_crc = crc32(firmware_payload, FIRMWARE_PAYLOAD_LEN);
-
       if(received_crc == calculated_crc) {
           LOG_INFO("CRC32 dogrulamasi basarili! Firmware butunlugu saglandi.\n");
           LOG_INFO("================================================\n");
@@ -146,11 +143,6 @@ udp_rx_callback(struct simple_udp_connection *c,
       simple_udp_sendto(&udp_conn, &ack_no, sizeof(ack_no), sender_addr);
       return;
   }
-  /*
-  LOG_INFO("Server: Received block %u from ", received_packet->block_no);
-  LOG_INFO_6ADDR(sender_addr);
-  LOG_INFO_("\n");
-  */
 
   // 2. Parça Doğrulama: Gelen verinin checksum'ını hesaplayıp kontrol et
   uint16_t calculated_sum = 0;
@@ -188,14 +180,14 @@ udp_rx_callback(struct simple_udp_connection *c,
   } else {
       return;
   }
-  // Onay (ACK) Mekanizması
+  // Onay Mekanizması
 #if WITH_SERVER_REPLY
   uint16_t ack_no = received_packet->block_no;
   simple_udp_sendto(&udp_conn, &ack_no, sizeof(ack_no), sender_addr);
 #endif 
 }
 
-/*bu durunun yazdığı
+/*onay mekanizması
   // 3. Onay (ACK) Mekanizması: Başarılı bloğun numarasını göndericiye bildir
 #if WITH_SERVER_REPLY
   LOG_INFO("Sending ACK for block %u.\n", received_packet->block_no);
@@ -210,10 +202,8 @@ PROCESS_THREAD(udp_server_process, ev, data)
 {
   PROCESS_BEGIN();
 
-  /* Initialize DAG root */
   NETSTACK_ROUTING.root_start();
 
-  /* Initialize UDP connection */
   simple_udp_register(&udp_conn, UDP_SERVER_PORT, NULL,
                       UDP_CLIENT_PORT, udp_rx_callback);
   
