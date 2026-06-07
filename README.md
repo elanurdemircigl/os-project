@@ -1,5 +1,10 @@
 # OTA Firmware Güncelleme Sistemi
 
+---
+YouTube Link : https://youtu.be/gbOIFTTiRg4
+
+---
+
 ## 1. Projeye Genel Bakış
 
 Bu proje, Contiki-NG işletim sistemi üzerinde çalışan bir OTA (Over-The-Air)
